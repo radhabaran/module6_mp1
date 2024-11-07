@@ -16,12 +16,11 @@ import logging
 from typing import Optional, List, Dict
 import hashlib
 import secrets
-from google.colab import userdata
-from pyngrok import ngrok
 
 
 # Set OpenAI API key
-os.environ['OPENAI_API_KEY'] = userdata.get('OA_API')
+api_key = os.environ['OA_API']           
+os.environ['OPENAI_API_KEY'] = api_key
 
 # Load LLM
 llm = ChatOpenAI(model_name="gpt-4o-mini", temperature=0)
