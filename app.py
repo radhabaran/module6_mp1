@@ -1,10 +1,10 @@
 
 # Import the required packages
-from langchain.document_loaders import PyPDFLoader
+from langchain_community.document_loaders import PyPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.embeddings import OpenAIEmbeddings
-from langchain.vectorstores import FAISS
-from langchain.chat_models import ChatOpenAI
+from langchain_openai import OpenAIEmbeddings
+from langchain_community.vectorstores import FAISS
+from langchain_openai import ChatOpenAI
 from langchain.chains import ConversationalRetrievalChain
 import streamlit as st
 import pandas as pd
@@ -68,9 +68,9 @@ def authenticate_user(username: str, password: str)-> Optional[str]:
 def load_allowed_docs(user_type: str)-> List:
   docs = []
   if user_type == 'admin':
-    files = ["/content/drive/MyDrive/AI Datasets/finance_data.pdf", "/content/drive/MyDrive/AI Datasets/public_data.pdf"]
+    files = ["docs/finance_data.pdf", "docs/public_data.pdf"]
   else:
-    files = ["/content/drive/MyDrive/AI Datasets/public_data.pdf"]
+    files = ["docs/public_data.pdf"]
     
   for file in files:
     if not os.path.exists(file):
@@ -169,7 +169,7 @@ def main():
             st.session_state.messages = []
             if 'qa_chain' in st.session_state:
                 del st.session_state.qa_chain
-            st.experimental_rerun()
+            st.rerun()
 
 if __name__ == "__main__":
     main()
