@@ -41,10 +41,10 @@ def check_password(password: str, stored_hash: str) -> bool:
 
 
 def save_user(username: str, password: str, user_type: str) -> None:
-  file_exists = os.path.isfile('users.csv')
+  file_exists = os.path.isfile('data/users.csv')
   hashed_pw = hash_password(password)
     
-  with open('users.csv', 'a', newline='') as f:
+  with open('data/users.csv', 'a', newline='') as f:
     writer = csv.writer(f)
     if not file_exists:
       writer.writerow(['username', 'password', 'user_type'])
@@ -52,10 +52,10 @@ def save_user(username: str, password: str, user_type: str) -> None:
 
 
 def authenticate_user(username: str, password: str)-> Optional[str]:
-  if not os.path.exists('users.csv'):
+  if not os.path.exists('data/users.csv'):
     return None
         
-  df = pd.read_csv('users.csv')
+  df = pd.read_csv('data/users.csv')
   if username not in df['username'].values:
     return None
         
@@ -124,7 +124,7 @@ def main():
                         st.session_state.authenticated = True
                         st.session_state.user_type = user_type
                         st.success(f"Logged in as {user_type}")
-                        st.experimental_rerun()
+                        st.rerun()
                     else:
                         st.error("Invalid credentials")
         
