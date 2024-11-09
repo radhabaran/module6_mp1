@@ -5,8 +5,10 @@ langchain-core
 langchain-community
 sentence-transformers
 pypdf
+pysqlite3-binary>=0.5.1
+langchain-chroma
 chromadb
 tiktoken
 python-dotenv
 streamlit
-python-bcrypt
+bcrypt==4.1.2

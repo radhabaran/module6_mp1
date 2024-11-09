@@ -3,7 +3,7 @@
 from langchain_community.document_loaders import PyPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_openai import OpenAIEmbeddings
-from langchain_community.vectorstores import FAISS
+from langchain_chroma import Chroma
 from langchain_openai import ChatOpenAI
 from langchain.chains import ConversationalRetrievalChain, LLMChain
 from langchain.prompts import PromptTemplate
@@ -28,6 +28,12 @@ os.environ['OPENAI_API_KEY'] = api_key
 planner_llm = ChatOpenAI(model_name="gpt-4o-mini", temperature=0)
 classifier_llm = ChatOpenAI(model_name="gpt-3.5-turbo-instruct", temperature=0)
 qa_llm = ChatOpenAI(model_name="gpt-4o-mini", temperature=0)
+
+# Add directory creation for data and vector stores
+def ensure_directories_exist():
+    os.makedirs("data", exist_ok=True)
+    os.makedirs("vector_stores", exist_ok=True)
+    os.makedirs("docs", exist_ok=True)
 
 # Vector store paths
 FINANCE_DB_PATH = "vector_stores/finance_db"
@@ -102,30 +108,33 @@ class QueryPlanner:
         )
         return json.loads(result)
 
-def create_vector_store(file_path: str, store_path: str) -> FAISS:
-    """Create and save vector store for a PDF file"""
-    if os.path.exists(store_path):
-        print(f"Loading existing vector store from {store_path}")
-        embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
-        return FAISS.load_local(store_path, embeddings)
+def create_vector_store(file_path: str, store_path: str):
+    """Create or load a vector store using Chroma"""
     
-    print(f"Creating new vector store for {file_path}")
-    loader = PyPDFLoader(file_path)
-    documents = loader.load()
-    
-    text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1000,
-        chunk_overlap=200,
-        length_function=len
-    )
-    chunks = text_splitter.split_documents(documents)
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"PDF file not found: {file_path}")
     
     embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
-    vectorstore = FAISS.from_documents(chunks, embeddings)
     
-    os.makedirs(os.path.dirname(store_path), exist_ok=True)
-    vectorstore.save_local(store_path)
+    if os.path.exists(store_path):
+        return Chroma(
+            persist_directory=store_path,
+            embedding_function=embeddings
+        )
     
+    # Create new vector store
+    loader = PyPDFLoader(file_path)
+    documents = loader.load()
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=1000,
+        chunk_overlap=200
+    )
+    chunks = text_splitter.split_documents(documents)
+    vectorstore = Chroma.from_documents(
+        documents=chunks,
+        embedding=embeddings,
+        persist_directory=store_path
+    )
     return vectorstore
 
 
@@ -180,10 +189,15 @@ class VectorStoreManager:
         self.initialize_stores()
     
     def initialize_stores(self):
-        """Initialize vector stores based on user type"""
-        self.public_store = create_vector_store("docs/public_data.pdf", PUBLIC_DB_PATH)
+        self.public_store = create_vector_store(
+            "docs/public_data.pdf", 
+            os.path.join("vector_stores", "public_db")
+        )
         if self.user_type == 'admin':
-            self.finance_store = create_vector_store("docs/finance_data.pdf", FINANCE_DB_PATH)
+            self.finance_store = create_vector_store(
+                "docs/finance_data.pdf",
+                os.path.join("vector_stores", "finance_db")
+            )
     
     def get_relevant_documents(self, query: str) -> List:
         """Get relevant documents based on query classification and user type"""
@@ -214,7 +228,8 @@ def initialize_rag(vector_store_manager: VectorStoreManager) -> ConversationalRe
     qa_chain = ConversationalRetrievalChain.from_llm(
         llm=qa_llm,
         retriever=smart_retriever,
-        return_source_documents=True
+        return_source_documents=True,
+        memory=None
     )
     
     return qa_chain
@@ -222,6 +237,8 @@ def initialize_rag(vector_store_manager: VectorStoreManager) -> ConversationalRe
 
 # Streamlit UI
 def main():
+    
+    ensure_directories_exist()
     st.title("RAG System with User Access Control")
 
     # Initialize session state
@@ -281,7 +298,11 @@ def main():
             st.session_state.messages.append({"role": "user", "content": prompt})
             st.chat_message("user").markdown(prompt)
             
-            response = st.session_state.qa_chain({"question": prompt, "chat_history": []})
+            response = st.session_state.qa_chain({
+                "question": prompt, 
+                "chat_history": st.session_state.chat_history
+            })
+            st.session_state.chat_history.append((prompt, response["answer"]))
             st.session_state.messages.append({"role": "assistant", "content": response["answer"]})
             st.chat_message("assistant").markdown(response["answer"])
         
@@ -289,6 +310,7 @@ def main():
             st.session_state.authenticated = False
             st.session_state.user_type = None
             st.session_state.messages = []
+            st.session_state.chat_history = []
             if 'qa_chain' in st.session_state:
                 del st.session_state.qa_chain
             if 'vector_store_manager' in st.session_state:
