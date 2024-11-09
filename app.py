@@ -5,7 +5,8 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_openai import OpenAIEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_openai import ChatOpenAI
-from langchain.chains import ConversationalRetrievalChain
+from langchain.chains import ConversationalRetrievalChain, LLMChain
+from langchain.prompts import PromptTemplate
 import streamlit as st
 import pandas as pd
 import os
@@ -16,14 +17,118 @@ import logging
 from typing import Optional, List, Dict
 import hashlib
 import secrets
+import json
 
 
 # Set OpenAI API key
 api_key = os.environ['OA_API']           
 os.environ['OPENAI_API_KEY'] = api_key
 
-# Load LLM
-llm = ChatOpenAI(model_name="gpt-4o-mini", temperature=0)
+# Load LLMs
+planner_llm = ChatOpenAI(model_name="gpt-4o-mini", temperature=0)
+classifier_llm = ChatOpenAI(model_name="gpt-3.5-turbo-instruct", temperature=0)
+qa_llm = ChatOpenAI(model_name="gpt-4o-mini", temperature=0)
+
+# Vector store paths
+FINANCE_DB_PATH = "vector_stores/finance_db"
+PUBLIC_DB_PATH = "vector_stores/public_db"
+
+# Classification prompt
+CLASSIFIER_TEMPLATE = """
+Given a user query, determine which knowledge base(s) would be most relevant to answer it:
+- Financial Data: Contains financial reports, metrics, and confidential business information
+- Public Data: Contains general information, public reports, and non-confidential data
+
+Query: {query}
+
+Respond with a JSON object with the following structure:
+{
+    "financial_data": true/false,
+    "public_data": true/false,
+    "reasoning": "brief explanation"
+}
+"""
+
+CLASSIFIER_PROMPT = PromptTemplate(
+    input_variables=["query"],
+    template=CLASSIFIER_TEMPLATE
+)
+
+# Planning prompt
+PLANNER_TEMPLATE = """
+Based on the classification results and user type, determine the final search strategy.
+
+Classification Results: {classification_results}
+User Type: {user_type}
+
+Respond with a JSON object with the following structure:
+{
+    "search_financial": true/false,
+    "search_public": true/false,
+    "explanation": "brief explanation"
+}
+
+Remember:
+- Only admin users can access financial data
+- All users can access public data
+"""
+
+PLANNER_PROMPT = PromptTemplate(
+    input_variables=["classification_results", "user_type"],
+    template=PLANNER_TEMPLATE
+)
+
+class QueryPlanner:
+    def __init__(self):
+        self.classifier_chain = LLMChain(
+            llm=classifier_llm,
+            prompt=CLASSIFIER_PROMPT
+        )
+        self.planner_chain = LLMChain(
+            llm=planner_llm,
+            prompt=PLANNER_PROMPT
+        )
+    
+    def classify_query(self, query: str) -> Dict:
+        """Classify which knowledge base(s) might be relevant"""
+        result = self.classifier_chain.run(query=query)
+        return json.loads(result)
+    
+    def plan_search(self, classification_results: Dict, user_type: str) -> Dict:
+        """Plan the final search strategy based on classification and user type"""
+        result = self.planner_chain.run(
+            classification_results=json.dumps(classification_results),
+            user_type=user_type
+        )
+        return json.loads(result)
+
+def create_vector_store(file_path: str, store_path: str) -> FAISS:
+    """Create and save vector store for a PDF file"""
+    if os.path.exists(store_path):
+        print(f"Loading existing vector store from {store_path}")
+        embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
+        return FAISS.load_local(store_path, embeddings)
+    
+    print(f"Creating new vector store for {file_path}")
+    loader = PyPDFLoader(file_path)
+    documents = loader.load()
+    
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=1000,
+        chunk_overlap=200,
+        length_function=len
+    )
+    chunks = text_splitter.split_documents(documents)
+    
+    embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
+    vectorstore = FAISS.from_documents(chunks, embeddings)
+    
+    os.makedirs(os.path.dirname(store_path), exist_ok=True)
+    vectorstore.save_local(store_path)
+    
+    return vectorstore
+
+
 
 # Helper functions for user management
 def hash_password(password: str) -> str:
@@ -64,41 +169,56 @@ def authenticate_user(username: str, password: str)-> Optional[str]:
     return user['user_type']
   return None
 
-
-def load_allowed_docs(user_type: str)-> List:
-  docs = []
-  if user_type == 'admin':
-    files = ["docs/finance_data.pdf", "docs/public_data.pdf"]
-  else:
-    files = ["docs/public_data.pdf"]
+class VectorStoreManager:
+    def __init__(self, user_type: str):
+        self.user_type = user_type
+        self.finance_store = None
+        self.public_store = None
+        self.query_planner = QueryPlanner()
+        
+        # Initialize available stores based on user type
+        self.initialize_stores()
     
-  for file in files:
-    if not os.path.exists(file):
-      raise FileNotFoundError(f"Required document {file} not found")
-    loader = PyPDFLoader(file)
-    docs.extend(loader.load())
+    def initialize_stores(self):
+        """Initialize vector stores based on user type"""
+        self.public_store = create_vector_store("docs/public_data.pdf", PUBLIC_DB_PATH)
+        if self.user_type == 'admin':
+            self.finance_store = create_vector_store("docs/finance_data.pdf", FINANCE_DB_PATH)
     
-  return docs
+    def get_relevant_documents(self, query: str) -> List:
+        """Get relevant documents based on query classification and user type"""
+        # Classify query
+        classification = self.query_planner.classify_query(query)
+        
+        # Plan search strategy
+        search_plan = self.query_planner.plan_search(classification, self.user_type)
+        
+        # Execute search
+        documents = []
+        if search_plan["search_financial"] and self.finance_store:
+            finance_docs = self.finance_store.similarity_search(query, k=2)
+            documents.extend(finance_docs)
+        
+        if search_plan["search_public"]:
+            public_docs = self.public_store.similarity_search(query, k=2)
+            documents.extend(public_docs)
+        
+        return documents
 
 
-def initialize_rag(docs: List)-> ConversationalRetrievalChain:
-    text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1000,
-        chunk_overlap=200,
-        length_function=len
-    )
-    chunks = text_splitter.split_documents(docs)
-    
-    embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
-    vectorstore = FAISS.from_documents(chunks, embeddings)
+def initialize_rag(vector_store_manager: VectorStoreManager) -> ConversationalRetrievalChain:
+    """Initialize RAG with intelligent query routing"""
+    def smart_retriever(query):
+        return vector_store_manager.get_relevant_documents(query)
     
     qa_chain = ConversationalRetrievalChain.from_llm(
-        llm=llm,
-        retriever=vectorstore.as_retriever(search_type="mmr", k=3),
+        llm=qa_llm,
+        retriever=smart_retriever,
         return_source_documents=True
     )
     
     return qa_chain
+
 
 # Streamlit UI
 def main():
@@ -141,13 +261,15 @@ def main():
                     else:
                         save_user(new_username, new_password, user_type)
                         st.success("User created successfully!")
-
+            pass
     else:
         st.write(f"Logged in as: {st.session_state.user_type}")
         
+        if 'vector_store_manager' not in st.session_state:
+            st.session_state.vector_store_manager = VectorStoreManager(st.session_state.user_type)
+
         if 'qa_chain' not in st.session_state:
-            docs = load_allowed_docs(st.session_state.user_type)
-            st.session_state.qa_chain = initialize_rag(docs)
+            st.session_state.qa_chain = initialize_rag(st.session_state.vector_store_manager)
         
         if 'messages' not in st.session_state:
             st.session_state.messages = []
@@ -169,6 +291,8 @@ def main():
             st.session_state.messages = []
             if 'qa_chain' in st.session_state:
                 del st.session_state.qa_chain
+            if 'vector_store_manager' in st.session_state:
+                del st.session_state.vector_store_manager
             st.rerun()
 
 if __name__ == "__main__":
